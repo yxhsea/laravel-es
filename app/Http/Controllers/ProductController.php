@@ -6,9 +6,20 @@ use App\ProductModel;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Elasticsearch\ClientBuilder;
+use PhpAmqpLib\Connection\AMQPStreamConnection;
+use PhpAmqpLib\Message\AMQPMessage;
 
 class ProductController extends Controller
 {
+    const PRODUCT_CREATE = 'laravel.product.create';
+    const PRODUCT_UPDATE = 'laravel.product.update';
+    const PRODUCT_DELETE = 'laravel.product.delete';
+
+    private $connection;
+    private $channel;
+    private $routingKey;
+    private $exchange;
+
     const INDEX = "product";
     const TYPE = "_doc";
 
@@ -19,6 +30,40 @@ class ProductController extends Controller
         $this->client = ClientBuilder::create()
             ->setHosts(['127.0.0.1:9200'])
             ->build();
+
+        $connConf = [
+            'host' => '127.0.0.1',
+            'port' => 5672,
+            'user' => 'guest',
+            'password' => 'guest',
+            'vhost' => '/'
+        ];
+
+        $this->connection =  new AMQPStreamConnection(
+            $connConf['host'],
+            $connConf['port'],
+            $connConf['user'],
+            $connConf['password'],
+            $connConf['vhost']
+        );
+
+        $this->exchange = "event-bus";
+        $this->channel = $this->connection->channel();
+        $this->channel->basic_qos(0, 1, false);
+        $this->channel->exchange_declare($this->exchange, "topic", true, true, false);
+    }
+
+    public function __destruct()
+    {
+        // 关闭信道和链接
+        $this->channel->close();
+        $this->connection->close();
+    }
+
+    private function publishMsg($body)
+    {
+        $msg = new AMQPMessage(serialize($body), ['delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT]);
+        $this->channel->basic_publish($msg, $this->exchange, $this->routingKey);
     }
 
     /**
@@ -50,24 +95,20 @@ class ProductController extends Controller
 
 
         $params = [
-            'body' => [
-                ProductModel::PRODUCT_ID    => $productId,
-                ProductModel::TITLE         => $title,
-                ProductModel::LONG_TITLE    => $longTitle,
-                ProductModel::DESCRIPTION   => $description,
-                ProductModel::SKU           => $sku,
-                ProductModel::PRICE         => $price,
-                ProductModel::SALES         => $sales,
-                ProductModel::CREATED_AT    => $nowTime,
-                ProductModel::UPDATED_AT    => $nowTime
-            ],
-            'id'    => $productId,
-            'index' => self::INDEX,
-            'type'  => self::TYPE,
+            ProductModel::PRODUCT_ID    => $productId,
+            ProductModel::TITLE         => $title,
+            ProductModel::LONG_TITLE    => $longTitle,
+            ProductModel::DESCRIPTION   => $description,
+            ProductModel::SKU           => $sku,
+            ProductModel::PRICE         => $price,
+            ProductModel::SALES         => $sales,
+            ProductModel::CREATED_AT    => $nowTime,
+            ProductModel::UPDATED_AT    => $nowTime
         ];
 
-        // 商品数据写入 ES
-        $this->client->create($params);
+        // 将数据投递到 RabbitMQ
+        $this->routingKey = self::PRODUCT_CREATE;
+        $this->publishMsg($params);
 
         return Response()->json(['code' => 0, 'msg' => 'success']);
     }
@@ -84,14 +125,13 @@ class ProductController extends Controller
         // 删除 DB 中的商品数据
         DB::table(ProductModel::TABLE_NAME)->where(ProductModel::PRODUCT_ID, $productId)->delete();
 
-
-        // 删除 ES 中的商品数据
         $params = [
-            'id'    => $productId,
-            'index' => self::INDEX,
-            'type'  => self::TYPE,
+            ProductModel::PRODUCT_ID => $productId,
         ];
-        $this->client->delete($params);
+
+        // 将数据投递到 RabbitMQ
+        $this->routingKey = self::PRODUCT_DELETE;
+        $this->publishMsg($params);
 
         return Response()->json(['code' => 0, 'msg' => 'success']);
     }
@@ -127,24 +167,19 @@ class ProductController extends Controller
 
 
         $params = [
-            'body' => [
-                ProductModel::PRODUCT_ID    => $productId,
-                ProductModel::TITLE         => $title,
-                ProductModel::LONG_TITLE    => $longTitle,
-                ProductModel::DESCRIPTION   => $description,
-                ProductModel::SKU           => $sku,
-                ProductModel::PRICE         => $price,
-                ProductModel::SALES         => $sales,
-                ProductModel::CREATED_AT    => $nowTime,
-                ProductModel::UPDATED_AT    => $nowTime
-            ],
-            'id'    => $productId,
-            'index' => self::INDEX,
-            'type'  => self::TYPE,
+            ProductModel::PRODUCT_ID    => $productId,
+            ProductModel::TITLE         => $title,
+            ProductModel::LONG_TITLE    => $longTitle,
+            ProductModel::DESCRIPTION   => $description,
+            ProductModel::SKU           => $sku,
+            ProductModel::PRICE         => $price,
+            ProductModel::SALES         => $sales,
+            ProductModel::UPDATED_AT    => $nowTime
         ];
 
-        // 商品数据更新到 ES
-        $this->client->update($params);
+        // 将数据投递到 RabbitMQ
+        $this->routingKey = self::PRODUCT_UPDATE;
+        $this->publishMsg($params);
 
         return Response()->json(['code' => 0, 'msg' => 'success']);
     }
